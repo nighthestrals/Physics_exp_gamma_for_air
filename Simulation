@@ -1,0 +1,130 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+import pandas as pd
+
+# ================= 1. 参数设置 =================
+P0 = 101.325  # 大气压 (kPa)
+GAMMA_TRUE = 1.400  # 设定的真实绝热指数（用于生成数据）
+TAU = 15.0  # 系统热弛豫时间常数 (s)
+NOISE_STD = 0.01  # 模拟传感器噪声 (kPa)
+
+# 实验操作参数
+h1_target = 7.00  # 初始表压 (kPa)
+duration = 60  # 采样总时长 (s)
+fs = 100  # 采样率 (Hz)
+t_release = 10.0  # 放气时刻 (s)
+t_valve_open = 0.4  # 阀门开启时长 (s)
+
+
+# ================= 2. 仿真核心逻辑 =================
+def simulate_experiment():
+    """生成模拟实验数据"""
+    t = np.linspace(0, duration, int(duration * fs))
+    P = np.zeros_like(t)
+
+    # 根据公式 h2 = h1 * (1 - 1/gamma) 反推理论上的 h2
+    h2_theoretical = h1_target * (1 - 1 / GAMMA_TRUE)
+
+    for i, ti in enumerate(t):
+        if ti < t_release:
+            # 阶段1: 初始稳态
+            P[i] = h1_target
+        elif ti < t_release + t_valve_open:
+            # 阶段2: 快速放气 (简化线性下降)
+            ratio = (ti - t_release) / t_valve_open
+            P[i] = h1_target * (1 - ratio)
+        else:
+            # 阶段3: 等容回升 (牛顿冷却定律)
+            dt = ti - (t_release + t_valve_open)
+            P_lowest = 0.05  # 模拟未完全降至0
+            # 指数回升模型
+            P[i] = h2_theoretical - (h2_theoretical - P_lowest) * np.exp(-dt / TAU)
+
+    # 添加随机噪声
+    P_noisy = P + np.random.normal(0, NOISE_STD, size=len(P))
+    return t, P_noisy
+
+
+def recovery_model(t, p_final, a, k):
+    """用于拟合的指数模型"""
+    return p_final - a * np.exp(-k * t)
+
+
+# ================= 3. 主程序执行 =================
+if __name__ == "__main__":
+    # A. 生成数据
+    print("正在生成仿真数据...")
+    t, p_data = simulate_experiment()
+
+    # B. 数据处理与拟合
+    # 截取回升段 (放气结束2秒后开始拟合，避开波动)
+    fit_start_time = t_release + t_valve_open + 2.0
+    mask = t > fit_start_time
+
+    # 归一化时间轴用于拟合 (从0开始)
+    t_fit = t[mask] - fit_start_time
+    p_fit = p_data[mask]
+
+    try:
+        # 执行非线性最小二乘拟合
+        popt, pcov = curve_fit(recovery_model, t_fit, p_fit, p0=[2.5, 2.5, 0.1])
+        h2_calc = popt[0]  # 拟合出的平衡位置
+
+        # 计算绝热指数
+        gamma_calc = h1_target / (h1_target - h2_calc)
+
+        print(f"\n--- 实验结果 ---")
+        print(f"初始表压 h1: {h1_target:.4f} kPa")
+        print(f"拟合 h2  : {h2_calc:.4f} kPa")
+        print(f"计算 γ   : {gamma_calc:.4f}")
+        print(f"真实 γ   : {GAMMA_TRUE:.4f}")
+
+        # ================= 4. 导出 Excel (新增功能) =================
+        df = pd.DataFrame({
+            'Time (s)': t,
+            'Pressure (kPa)': p_data
+        })
+
+        # 另外保存一个包含结果的表
+        df_res = pd.DataFrame({
+            'Parameter': ['h1', 'h2_fitted', 'Gamma_calc', 'Gamma_true'],
+            'Value': [h1_target, h2_calc, gamma_calc, GAMMA_TRUE]
+        })
+
+        filename = 'Adiabatic_Exp_Data.xlsx'
+        with pd.ExcelWriter(filename) as writer:
+            df.to_excel(writer, sheet_name='Raw_Data', index=False)
+            df_res.to_excel(writer, sheet_name='Results', index=False)
+
+        print(f"\n[成功] 数据已保存至: {filename}")
+
+        # ================= 5. 绘图 (恢复的功能) =================
+        print("正在绘图...")
+        plt.figure(figsize=(10, 6), dpi=100)
+
+        # 绘制原始噪点数据 (灰色细点)
+        plt.scatter(t, p_data, s=1, c='gray', alpha=0.3, label='Simulated Sensor Data')
+
+        # 绘制拟合曲线 (红色实线)
+        # 注意：只在拟合段绘制
+        plt.plot(t[mask], recovery_model(t_fit, *popt), 'r-', linewidth=2, label='Fitted Curve')
+
+        # 绘制辅助参考线 (绿色h1, 蓝色h2)
+        plt.axhline(y=h1_target, color='green', linestyle='--', label=f'h1 = {h1_target} kPa')
+        plt.axhline(y=h2_calc, color='blue', linestyle='--', label=f'h2 (Fitted) = {h2_calc:.3f} kPa')
+
+        # 标注放气时刻
+        plt.axvline(x=t_release, color='orange', linestyle=':', alpha=0.5)
+
+        plt.title('Adiabatic Expansion & Pressure Recovery Simulation')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Gauge Pressure (kPa)')
+        plt.legend(loc='lower right')
+        plt.grid(True)
+
+        # 显示图表
+        plt.show()
+
+    except Exception as e:
+        print(f"程序运行出错: {e}")
