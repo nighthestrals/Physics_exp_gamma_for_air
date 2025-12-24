@@ -1,0 +1,101 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def calculate_displacement(ref_img_path, target_img_path, roi_y_range, scale_factor):
+    """
+    计算两张图片之间的标尺位移
+    :param ref_img_path: 0kg时的基准图片路径
+    :param target_img_path: 加载后的图片路径
+    :param roi_y_range: 感兴趣区域的Y轴范围 (y_start, y_end)，避免背景干扰
+    :param scale_factor: 像素当量 (cm/pixel)
+    :return: 物理位移 (cm)
+    """
+    # 1. 读取图片并转为灰度
+    img_ref = cv2.imread(ref_img_path, 0)
+    img_target = cv2.imread(target_img_path, 0)
+
+    if img_ref is None or img_target is None:
+        print("错误：无法读取图片")
+        return None
+
+    # 2. 截取感兴趣区域 (ROI)，通常标尺在图像中央
+    # 假设图像宽度为W，我们只取中间部分，高度取roi_y_range
+    h, w = img_ref.shape
+    x_center = w // 2
+    x_start, x_end = x_center - 100, x_center + 100  # 取中间200像素宽
+
+    # 裁剪基准图的模板 (取中间一段特征明显的刻度)
+    template = img_ref[roi_y_range[0]:roi_y_range[1], x_start:x_end]
+
+    # 3. 模板匹配
+    # 在目标图中寻找基准图的模板位置
+    res = cv2.matchTemplate(img_target, template, cv2.TM_CCOEFF_NORMED)
+    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+
+    # max_loc 为最佳匹配的左上角坐标 (x, y)
+    # 原始ROI的左上角坐标为 (x_start, roi_y_range[0])
+
+    # 4. 计算像素位移 (由于是重力拉伸，主要是Y轴方向位移)
+    # 注意：光杠杆原理下，标尺像是向下还是向上移动取决于光路，这里取绝对值
+    pixel_shift = abs(max_loc[1] - roi_y_range[0])
+
+    # 5. 换算为物理位移
+    physical_displacement = pixel_shift * scale_factor
+
+    return pixel_shift, physical_displacement
+
+
+# ================= 使用示例 =================
+
+# 1. 标定像素当量 (需要你自己测量图片中1cm有多少个像素)
+# 假设你在图片中量得：1cm刻度 = 455个像素
+pixels_per_cm = 455
+k = 1.0 / pixels_per_cm  # cm/pixel
+
+# 2. 模拟文件列表 (请替换为你拍摄的真实图片文件名)
+# 假设图片命名为: 0kg.jpg, 1kg.jpg, 2kg.jpg
+image_files = {
+    0.0: "0kg.jpg",
+    1.0: "1kg.jpg",
+    2.0: "2kg.jpg",
+    3.0: "3kg.jpg"
+}
+
+print(f"--- 开始处理 (像素当量 k={k:.5f} cm/px) ---")
+
+base_img = image_files[0.0]
+results = []
+
+# 选取基准图中刻度清晰的一段Y轴范围作为模板 (例如第500到800行)
+roi_y = (500, 800)
+
+for load, filename in image_files.items():
+    if load == 0.0:
+        results.append((load, 0.0, 0.0))
+        continue
+
+    try:
+        # 在真实运行前，请确保目录下有这些jpg文件，否则会报错
+        px, disp = calculate_displacement(base_img, filename, roi_y, k)
+        results.append((load, px, disp))
+        print(f"载荷 {load}kg: 位移 {px} px -> {disp:.4f} cm")
+
+    except Exception as e:
+        print(f"处理 {filename} 出错: {e}")
+
+# 3. 简单绘图
+loads = [r[0] for r in results]
+disps = [r[2] for r in results]
+
+plt.figure(figsize=(8, 6))
+plt.plot(loads, disps, 'o-', label='Measured Data')
+plt.title(f"Young's Modulus Experiment: Load vs Displacement")
+plt.xlabel("Load M (kg)")
+plt.ylabel("Displacement Delta n (cm)")
+plt.grid(True)
+plt.legend()
+plt.show()
+
+print("\n--- 处理完成，请将数据填入论文表格 ---")
